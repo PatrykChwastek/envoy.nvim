@@ -1,0 +1,299 @@
+*envoy.txt*    HTTP client for Neovim with Elasticsearch awareness
+
+==============================================================================
+CONTENTS                                                      *envoy-contents*
+
+  1. Introduction ............................. |envoy-introduction|
+  2. Setup .................................... |envoy-setup|
+  3. Configuration ............................ |envoy-config|
+  4. File format .............................. |envoy-http-format|
+  5. Variables ................................ |envoy-variables|
+  6. Commands ................................. |envoy-commands|
+  7. Keymaps .................................. |envoy-keymaps|
+  8. Picker ................................... |envoy-picker|
+  9. Elasticsearch features ................... |envoy-elastic|
+ 10. Completion ............................... |envoy-complete|
+ 11. Bulk API ................................. |envoy-bulk|
+ 12. Kibana import ............................ |envoy-kibana|
+ 13. Debugging ................................ |envoy-debug|
+
+==============================================================================
+1. INTRODUCTION                                           *envoy-introduction*
+
+Envoy is a buffer-driven HTTP client for `.http` / `.rest` files, focused on
+working with Elasticsearch from inside Neovim.
+
+Features:
+  - Run requests with <CR>, run visual selection, run last, pick from a list
+  - Telescope picker with comment-aware fuzzy search
+  - Elasticsearch-aware omnifunc: indices, mappings, DSL keywords
+  - Bulk API: auto-NDJSON compaction, per-item response summary
+  - Kibana Dev Tools paste-conversion (`:lua require'envoy'.import_kibana()`)
+  - Stable folding for both .http and result buffers
+
+==============================================================================
+2. SETUP                                                         *envoy-setup*
+
+                                                              *envoy.setup()*
+require("envoy").setup({opts})
+
+Minimum:
+>lua
+    require("envoy").setup({
+        elastic = { base_url = "http://localhost:9200" },
+    })
+<
+
+With lazy.nvim:
+>lua
+    {
+        "PatrykChwastek/envoy.nvim",
+        ft   = { "http", "rest" },
+        cmd  = { "EnvoyRefresh", "EnvoyDebug" },
+        opts = {
+            elastic = { base_url = "http://localhost:9200" },
+            env_name = "dev",
+        },
+    }
+<
+
+==============================================================================
+3. CONFIGURATION                                                *envoy-config*
+
+Full defaults:
+>lua
+    {
+        result_win_width   = 80,    -- vertical split width for result buffer
+        env_file           = nil,   -- explicit env file; nil = auto-detect
+                                    --   http-client.env.json next to buffer
+        env_name           = "dev",
+        fold_level_on_open = 0,     -- 0 = fold all, 99 = expand all
+        picker             = "auto",-- "auto" | "telescope" | "native"
+        keys = {
+            run            = "<CR>",
+            run_focus      = "<C-CR>",   -- run + focus result window
+            run_last       = "<leader><CR>",
+            pick           = "<leader>R",
+            next_request   = "]r",
+            prev_request   = "[r",
+            format_body    = "<leader>fj",
+            help           = "g?",
+        },
+        elastic = {
+            base_url    = nil,
+            api_key     = nil,           -- "ApiKey <value>" auto-injected
+            format_hits = true,          -- pretty-print _search hits
+        },
+        complete = {
+            enabled        = true,
+            fetch_indices  = true,       -- /_cat/indices on buffer open
+            fetch_mappings = true,       -- /_mapping per referenced index
+        },
+    }
+<
+
+Any key set to `""` disables that mapping.
+
+==============================================================================
+4. FILE FORMAT                                              *envoy-http-format*
+
+Envoy parses standard .http / .rest syntax plus Kibana Dev Tools shorthand.
+
+Explicit separator:
+>http
+    ### Get users
+    GET {{baseUrl}}/users
+    Authorization: Bearer abc
+
+    ### Create user
+    POST {{baseUrl}}/users
+    Content-Type: application/json
+
+    { "name": "alice" }
+<
+
+Implicit separator (Kibana style — a new method line ends the previous one):
+>http
+    GET /_cat/indices?v
+
+    # comments before a method line attach to that request
+    POST items/_count
+    {
+      "query": { "match_all": {} }
+    }
+<
+
+Trailing `#` lines and blanks are moved into the following section so
+comments stay with their request.
+
+==============================================================================
+5. VARIABLES                                                 *envoy-variables*
+
+File-level:
+>http
+    @baseUrl = http://localhost:9200
+    @index   = items
+
+    GET {{baseUrl}}/{{index}}/_count
+<
+
+Env file (auto-loaded from `http-client.env.json` next to the buffer, or set
+explicitly via `env_file`):
+>json
+    {
+        "dev":  { "baseUrl": "http://localhost:9200" },
+        "prod": { "baseUrl": "https://es.example.com" }
+    }
+<
+The active environment is `env_name` (default `"dev"`).
+
+Resolution order: file `@vars` → env file → built-ins (`es_url`, `baseUrl`
+both populated from `elastic.base_url`).
+
+==============================================================================
+6. COMMANDS                                                   *envoy-commands*
+
+                                                              *:EnvoyRefresh*
+:EnvoyRefresh        Clear and re-fetch the ES indices + mapping caches used
+                     by completion.
+
+                                                                *:EnvoyDebug*
+:EnvoyDebug          Show completion cache state, last fetch error, parsed
+                     requests in the current buffer, and which request the
+                     cursor maps to. Use this first when something feels off.
+
+==============================================================================
+7. KEYMAPS                                                     *envoy-keymaps*
+
+Buffer-local (set on .http buffers); configurable in `keys`:
+
+    <CR>            Run the request at the cursor (or closest above)
+    v + <CR>        Run every request overlapping the visual selection,
+                    results shown together in one window
+    <C-CR>          Same as <CR>, then focus the result window
+    <leader><CR>    Re-run the last request(s)
+    <leader>R       Open picker (Telescope or vim.ui.select)
+    ]r / [r         Jump to next / previous request
+    <leader>fj      Format JSON body under cursor
+    g?              Show the keymap cheat-sheet popup
+
+In the result window:
+    <leader><CR>    Re-run last
+    <leader>R       Open picker (without leaving the result window)
+
+==============================================================================
+8. PICKER                                                       *envoy-picker*
+
+Default: `picker = "auto"` — uses Telescope if installed, else vim.ui.select.
+
+Telescope features:
+  - Method + URL columns; the comment above each request is appended for
+    fuzzy search (so `# count members` matches that request)
+  - `<Tab>` to multi-select; <CR> runs all selected, results combined
+
+Run from anywhere — the picker does not switch you away from the result
+window when triggered from inside it.
+
+==============================================================================
+9. ELASTICSEARCH FEATURES                                      *envoy-elastic*
+
+  - `Authorization: ApiKey <key>` injected when `elastic.api_key` is set and
+    the request has no explicit `Authorization` header
+  - `_search` responses can be reformatted to flatten `hits.hits` for easier
+    reading (toggle with `elastic.format_hits`)
+  - URLs without a scheme get `elastic.base_url` prepended
+  - Built-in vars `{{es_url}}` and `{{baseUrl}}` resolve to `elastic.base_url`
+
+==============================================================================
+10. COMPLETION                                                *envoy-complete*
+
+Envoy installs an `omnifunc` for .http buffers. Trigger with `<C-x><C-o>` or
+via your completion engine (nvim-cmp `cmp-omni` source, blink.cmp `omni`).
+
+Three context-aware tiers:
+
+  Index names         after `METHOD ` on a URL line, before the first `/`
+  Endpoints           after `/<index>/` — suggests `_search`, `_count`, …
+  Fields + DSL        inside a JSON body — mapping fields from the request's
+                      target index + ES query DSL keywords
+
+Field cache state per index (see `:EnvoyDebug`):
+  in-flight           a fetch is currently running
+  N fields            fetched successfully
+  (absent)            not yet attempted
+
+Failed fetches clear themselves so `:EnvoyRefresh` can retry.
+
+Multi-index URLs (e.g. `items,logs/_search`) are skipped — no single mapping
+to fetch. Field names are deduplicated across nested objects: typing `na`
+suggests `name` once, not `chat.name` / `user.name` separately.
+
+Disable selectively:
+>lua
+    complete = {
+        enabled        = true,
+        fetch_indices  = false,   -- DSL + fields only
+        fetch_mappings = false,   -- DSL + index names only
+    }
+<
+
+==============================================================================
+11. BULK API                                                      *envoy-bulk*
+
+Any request whose URL contains `/_bulk` triggers automatic body preparation:
+
+  - Multi-line JSON objects compacted to one-line NDJSON
+  - Triple-quoted Kibana strings `"""…"""` converted to escaped JSON strings
+  - Trailing newline added (required by ES)
+  - `Content-Type: application/x-ndjson` set if not already present
+
+Response display shows per-item status:
+>
+    [1] ✓ index  items/_doc/abc   → created
+    [2] ✗ update items/_doc/xyz   → version_conflict_engine_exception
+<
+
+==============================================================================
+12. KIBANA IMPORT                                               *envoy-kibana*
+
+Paste from Kibana Dev Tools, then convert:
+>vim
+    :lua require("envoy").import_kibana()
+<
+
+Reads the system clipboard (`+` register, then `"` fallback), converts the
+Dev Tools format to .http syntax (resolving `{{es_url}}`), and inserts it at
+the cursor.
+
+You can pass an explicit base URL to override `elastic.base_url`:
+>vim
+    :lua require("envoy").import_kibana("https://es.example.com")
+<
+
+==============================================================================
+13. DEBUGGING                                                    *envoy-debug*
+
+First stop for anything weird is |:EnvoyDebug|. It prints:
+
+  - The resolved `base_url` and whether completion is enabled
+  - How many indices are cached + a sample
+  - Per-index mapping state, with sample field names + types
+  - The last curl/decode error (cleared on `:EnvoyRefresh`)
+  - All requests parsed from the current buffer with line ranges, and which
+    one the cursor maps to — useful when "wrong request runs"
+
+Common issues:
+
+  curl exit=7        Connection refused. ES not running or wrong `base_url`.
+  curl exit=28       Timed out (>5s).
+  decode … error     Response wasn't valid JSON (usually means ES returned
+                     an error object instead of the expected array).
+  cursor picks the   `:EnvoyDebug` shows line ranges of every parsed
+   wrong request     request; check whether your separator (`###` or new
+                     method line) is where you expect.
+
+Body parse errors from ES often come from invisible unicode whitespace
+pasted from a browser (e.g. U+00A0 non-breaking space). Envoy strips these
+before sending; if you still see one, check the body for U+200B / U+FEFF.
+
+vim:tw=78:ts=8:noet:ft=help:norl:
